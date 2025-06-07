@@ -4,12 +4,17 @@ import {
   UploadedFile,
   UseInterceptors,
   Body,
+  Get,
+  Query,
+  Patch,
+  Param,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
+import { User } from './entities/user.entity';
 
 @Controller('users')
 export class UsersController {
@@ -34,5 +39,26 @@ export class UsersController {
     @Body() body: CreateUserDto,
   ) {
     return this.usersService.create(body, file);
+  }
+
+  @Get('payments/search')
+  async searchPayment(@Query('query') query: string): Promise<Partial<User>[]> {
+    if (!query) return [];
+    const users = await this.usersService.searchByNameOrLastname(query);
+    return users.map((u) => ({
+      firstname: u.firstname,
+      lastname: u.lastname,
+      is_paid: u.is_paid,
+    }));
+  }
+
+  @Get('unpaid')
+  findUnpaid(): Promise<User[]> {
+    return this.usersService.findUnpaid();
+  }
+
+  @Patch(':id/approve')
+  approveUser(@Param('id') id: string): Promise<User> {
+    return this.usersService.approveUser(+id);
   }
 }
