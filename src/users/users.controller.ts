@@ -61,4 +61,22 @@ export class UsersController {
   approveUser(@Param('id') id: string): Promise<User> {
     return this.usersService.approveUser(+id);
   }
+
+  @Get('groups/available')
+  async getAvailableForGrouping(): Promise<User[]> {
+    return this.usersService.getPaidPlayersWithoutGroups();
+  }
+
+  @Get('groups')
+  async getGroupedPlayers() {
+    return this.usersService.getGroupedPlayers();
+  }
+
+  @Post('groups/assign')
+  async assignGroups(
+    @Body() body: { assignments: { userId: number; groupName: string }[] },
+  ) {
+    await this.usersService.assignGroups(body.assignments);
+    return { message: 'Groups assigned successfully' };
+  }
 }

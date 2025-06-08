@@ -26,6 +26,9 @@ export class User {
   @Column({ default: false })
   is_paid: boolean;
 
+  @Column({ nullable: true })
+  group_name: string;
+
   @Column({
     type: 'timestamp',
     default: () => 'CURRENT_TIMESTAMP',

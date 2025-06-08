@@ -1,5 +1,5 @@
 import { Injectable, Inject, NotFoundException } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import { User } from './entities/user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 
@@ -53,5 +53,47 @@ export class UsersService {
     if (!user) throw new NotFoundException('User not found');
     user.is_paid = true;
     return this.userRepository.save(user);
+  }
+  async getPaidPlayersWithoutGroups(): Promise<User[]> {
+    return this.userRepository.find({
+      where: {
+        is_paid: true,
+        group_name: IsNull(),
+      },
+      order: { category: 'ASC', createdAt: 'ASC' },
+    });
+  }
+  async getGroupedPlayers(): Promise<Record<string, Record<string, User[]>>> {
+    const players = await this.userRepository.find({
+      where: {
+        is_paid: true,
+        group_name: Not(IsNull()),
+      },
+      order: { category: 'ASC', group_name: 'ASC' },
+    });
+
+    const grouped: Record<string, Record<string, User[]>> = {};
+
+    for (const player of players) {
+      if (!grouped[player.category]) {
+        grouped[player.category] = {};
+      }
+      if (!grouped[player.category][player.group_name]) {
+        grouped[player.category][player.group_name] = [];
+      }
+      grouped[player.category][player.group_name].push(player);
+    }
+
+    return grouped;
+  }
+  async assignGroups(
+    assignments: { userId: number; groupName: string }[],
+  ): Promise<void> {
+    for (const assignment of assignments) {
+      await this.userRepository.update(
+        { id: assignment.userId },
+        { group_name: assignment.groupName },
+      );
+    }
   }
 }
