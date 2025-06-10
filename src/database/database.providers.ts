@@ -7,14 +7,17 @@ export const databaseProviders = [
     inject: [ConfigService],
     useFactory: async (configService: ConfigService) => {
       const dataSource = new DataSource({
-        type: 'mysql',
+        type: 'postgres',
         host: configService.get<string>('DB_HOST'),
-        port: 3306,
+        port: 5432,
         username: configService.get<string>('DB_USERNAME'),
         password: configService.get<string>('DB_PASSWORD'),
-        database: configService.get<string>('DB_USERNAME'),
+        database: configService.get<string>('DB_NAME'),
         entities: [__dirname + '/../**/*.entity{.ts,.js}'],
         synchronize: true,
+        ssl: {
+          rejectUnauthorized: false,
+        },
       });
 
       return dataSource.initialize();
