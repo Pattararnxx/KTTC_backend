@@ -8,6 +8,7 @@ import {
   Query,
   Patch,
   Param,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -78,5 +79,16 @@ export class UsersController {
   ) {
     await this.usersService.assignGroups(body.assignments);
     return { message: 'Groups assigned successfully' };
+  }
+
+  @Post('tournament/create-draw')
+  async createTournamentDraw() {
+    try {
+      await this.usersService.createTournamentWithDraw();
+      return { message: 'Tournament matches created successfully' };
+    } catch (error) {
+      console.error('Error creating tournament:', error);
+      throw new BadRequestException('Failed to create tournament matches');
+    }
   }
 }
