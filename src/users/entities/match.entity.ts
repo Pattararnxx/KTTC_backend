@@ -21,7 +21,7 @@ export class Match {
   tournament_id: number;
 
   @Column()
-  round: string; // group, round32, round16, quarter, semi, final
+  round: string; // group, round16, quarter, semi, final
 
   @Column({ nullable: true })
   group_name: string; // A, B, C, D

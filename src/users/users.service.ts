@@ -4,6 +4,7 @@ import { User } from './entities/user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { Match } from './entities/match.entity';
 import { Tournament } from './entities/tournament.entity';
+import { UpdateMatchScoreDto } from './dto/update-match-score.dto';
 
 type CreateUserData = Omit<User, 'id' | 'created_at'>;
 
@@ -322,5 +323,61 @@ export class UsersService {
     }
 
     return positions;
+  }
+  async findMatches(filters: {
+    category?: string;
+    groupName?: string;
+    round?: string;
+  }): Promise<Match[]> {
+    const qb = this.matchRepository
+      .createQueryBuilder('match')
+      .leftJoinAndSelect('match.tournament', 'tournament')
+      .leftJoinAndSelect('match.player1', 'player1')
+      .leftJoinAndSelect('match.player2', 'player2');
+
+    if (filters.category) {
+      qb.andWhere('tournament.category = :category', {
+        category: filters.category,
+      });
+    }
+    if (filters.groupName) {
+      qb.andWhere('match.group_name = :groupName', {
+        groupName: filters.groupName,
+      });
+    }
+    if (filters.round) {
+      qb.andWhere('match.round = :round', { round: filters.round });
+    }
+
+    qb.orderBy('match.match_order', 'ASC');
+
+    return await qb.getMany();
+  }
+
+  async updateMatchScore(matchId: number, dto: UpdateMatchScoreDto) {
+    const match = await this.matchRepository.findOne({
+      where: { id: matchId },
+    });
+    if (!match) throw new Error('Match not found');
+
+    match.player1_score = dto.player1_score;
+    match.player2_score = dto.player2_score;
+
+    if (dto.winner_id !== undefined) {
+      match.winner_id = dto.winner_id;
+    } else {
+      if (dto.player1_score > dto.player2_score) {
+        match.winner_id = match.player1_id;
+      } else if (dto.player2_score > dto.player1_score) {
+        match.winner_id = match.player2_id;
+      } else {
+        match.winner_id = null;
+      }
+    }
+
+    match.status = dto.status || 'completed';
+
+    await this.matchRepository.save(match);
+    return match;
   }
 }

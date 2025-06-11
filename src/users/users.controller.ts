@@ -16,6 +16,7 @@ import { extname } from 'path';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { User } from './entities/user.entity';
+import { UpdateMatchScoreDto } from './dto/update-match-score.dto';
 
 @Controller('users')
 export class UsersController {
@@ -90,5 +91,22 @@ export class UsersController {
       console.error('Error creating tournament:', error);
       throw new BadRequestException('Failed to create tournament matches');
     }
+  }
+
+  @Get('matches')
+  async getMatches(
+    @Query('category') category?: string,
+    @Query('group') groupName?: string,
+    @Query('round') round?: string,
+  ) {
+    return this.usersService.findMatches({ category, groupName, round });
+  }
+
+  @Patch('matches/:id/score')
+  async updateMatchScore(
+    @Param('id') id: string,
+    @Body() dto: UpdateMatchScoreDto,
+  ) {
+    return this.usersService.updateMatchScore(+id, dto);
   }
 }
