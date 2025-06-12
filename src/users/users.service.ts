@@ -25,6 +25,40 @@ interface PlayerStats {
   gamesWon: number;
   gamesLost: number;
 }
+const ROUND_NAMES = {
+  GROUP: 'group',
+  ROUND16: 'round16',
+  QUARTER: 'quarter',
+  SEMI: 'semi',
+  FINAL: 'final',
+} as const;
+
+type BracketRoundName =
+  | typeof ROUND_NAMES.ROUND16
+  | typeof ROUND_NAMES.QUARTER
+  | typeof ROUND_NAMES.SEMI
+  | typeof ROUND_NAMES.FINAL;
+
+const BRACKET_ROUNDS_ORDER: readonly BracketRoundName[] = [
+  ROUND_NAMES.ROUND16,
+  ROUND_NAMES.QUARTER,
+  ROUND_NAMES.SEMI,
+  ROUND_NAMES.FINAL,
+] as const;
+
+const ROUND_BASE_ORDERS: Record<BracketRoundName, number> = {
+  [ROUND_NAMES.ROUND16]: 1000,
+  [ROUND_NAMES.QUARTER]: 1000 + 8,
+  [ROUND_NAMES.SEMI]: 1000 + 8 + 4,
+  [ROUND_NAMES.FINAL]: 1000 + 8 + 4 + 2,
+};
+
+const MATCHES_PER_ROUND = {
+  [ROUND_NAMES.ROUND16]: 8,
+  [ROUND_NAMES.QUARTER]: 4,
+  [ROUND_NAMES.SEMI]: 2,
+  [ROUND_NAMES.FINAL]: 1,
+};
 
 @Injectable()
 export class UsersService {
@@ -258,37 +292,40 @@ export class UsersService {
       });
     }
 
-    let matchOrder = 1000;
+    let currentMatchOrder = ROUND_BASE_ORDERS[ROUND_NAMES.ROUND16];
 
     const seedPositions = this.calculateSeedPositions(
       BRACKET_SIZE,
       seedPlayers,
     );
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < MATCHES_PER_ROUND[ROUND_NAMES.ROUND16]; i++) {
       const player1 = seedPositions[i * 2] || null;
       const player2 = seedPositions[i * 2 + 1] || null;
 
       await this.matchRepository.save({
         tournament_id: tournamentId,
-        round: 'round16',
+        round: ROUND_NAMES.ROUND16,
         player1_id: player1?.id || null,
         player2_id: player2?.id || null,
-        match_order: matchOrder++,
+        match_order: currentMatchOrder++,
         status: 'pending',
       });
     }
 
-    const rounds = ['quarter', 'semi', 'final'];
-    const matchCounts = [4, 2, 1];
-
-    for (let r = 0; r < rounds.length; r++) {
-      for (let i = 0; i < matchCounts[r]; i++) {
+    const subsequentRounds = [
+      ROUND_NAMES.QUARTER,
+      ROUND_NAMES.SEMI,
+      ROUND_NAMES.FINAL,
+    ];
+    for (const roundName of subsequentRounds) {
+      currentMatchOrder = ROUND_BASE_ORDERS[roundName];
+      for (let i = 0; i < MATCHES_PER_ROUND[roundName]; i++) {
         await this.matchRepository.save({
           tournament_id: tournamentId,
-          round: rounds[r],
+          round: roundName,
           player1_id: null,
           player2_id: null,
-          match_order: matchOrder++,
+          match_order: currentMatchOrder++,
           status: 'pending',
         });
       }
@@ -375,11 +412,15 @@ export class UsersService {
     return await qb.getMany();
   }
 
-  async updateMatchScore(matchId: number, dto: UpdateMatchScoreDto) {
+  async updateMatchScore(
+    matchId: number,
+    dto: UpdateMatchScoreDto,
+  ): Promise<Match> {
     const match = await this.matchRepository.findOne({
       where: { id: matchId },
+      relations: ['tournament'],
     });
-    if (!match) throw new Error('Match not found');
+    if (!match) throw new NotFoundException('Match not found');
 
     match.player1_score = dto.player1_score;
     match.player2_score = dto.player2_score;
@@ -398,8 +439,107 @@ export class UsersService {
 
     match.status = dto.status || 'completed';
 
-    await this.matchRepository.save(match);
-    return match;
+    const savedMatch = await this.matchRepository.save(match);
+
+    if (
+      savedMatch.status === 'completed' &&
+      savedMatch.winner_id &&
+      savedMatch.tournament_id
+    ) {
+      await this.advanceWinnerToNextRound(
+        savedMatch.tournament_id,
+        savedMatch.round,
+        savedMatch.match_order,
+        savedMatch.winner_id,
+      );
+    }
+
+    return savedMatch;
+  }
+
+  private async advanceWinnerToNextRound(
+    tournamentId: number,
+    currentRound: string,
+    currentMatchOrder: number,
+    winnerId: number,
+  ): Promise<void> {
+    const currentRoundIndex = BRACKET_ROUNDS_ORDER.indexOf(
+      currentRound as BracketRoundName,
+    );
+
+    if (
+      currentRoundIndex === -1 ||
+      currentRoundIndex === BRACKET_ROUNDS_ORDER.length - 1
+    ) {
+      return;
+    }
+    const validCurrentRound = currentRound as BracketRoundName;
+
+    const nextRound = BRACKET_ROUNDS_ORDER[currentRoundIndex + 1];
+    const currentRoundBaseOrder = ROUND_BASE_ORDERS[validCurrentRound];
+    const nextRoundBaseOrder = ROUND_BASE_ORDERS[nextRound];
+
+    const relativeOrderInCurrentRound =
+      currentMatchOrder - currentRoundBaseOrder;
+
+    const targetMatchRelativeOrderInNextRound = Math.floor(
+      relativeOrderInCurrentRound / 2,
+    );
+    const targetMatchOrderInNextRound =
+      nextRoundBaseOrder + targetMatchRelativeOrderInNextRound;
+
+    const nextRoundMatch = await this.matchRepository.findOne({
+      where: {
+        tournament_id: tournamentId,
+        round: nextRound,
+        match_order: targetMatchOrderInNextRound,
+      },
+    });
+
+    if (!nextRoundMatch) {
+      console.warn(
+        `Could not find next round match for T_ID: ${tournamentId}, Round: ${nextRound}, Order: ${targetMatchOrderInNextRound}`,
+      );
+      return;
+    }
+
+    const isWinnerForPlayer1Slot = relativeOrderInCurrentRound % 2 === 0;
+
+    let successfullyUpdated = false;
+    if (isWinnerForPlayer1Slot) {
+      if (nextRoundMatch.player1_id === null) {
+        nextRoundMatch.player1_id = winnerId;
+        successfullyUpdated = true;
+      } else if (nextRoundMatch.player1_id !== winnerId) {
+        console.warn(
+          `Next match player1_id slot for ${nextRoundMatch.id} is already taken by ${nextRoundMatch.player1_id}, cannot set to ${winnerId}`,
+        );
+      }
+    } else {
+      if (nextRoundMatch.player2_id === null) {
+        nextRoundMatch.player2_id = winnerId;
+        successfullyUpdated = true;
+      } else if (nextRoundMatch.player2_id !== winnerId) {
+        console.warn(
+          `Next match player2_id slot for ${nextRoundMatch.id} is already taken by ${nextRoundMatch.player2_id}, cannot set to ${winnerId}`,
+        );
+      }
+    }
+    if (successfullyUpdated) {
+      await this.matchRepository.save(nextRoundMatch);
+      console.log(
+        `Advanced winner ${winnerId} from current match (order ${currentMatchOrder}) to next match ${nextRoundMatch.id} (order ${targetMatchOrderInNextRound}) as Player ${isWinnerForPlayer1Slot ? 1 : 2}`,
+      );
+    }
+    if (
+      nextRoundMatch.player1_id &&
+      nextRoundMatch.player2_id &&
+      nextRoundMatch.status === 'pending'
+    ) {
+      console.log(
+        `Match ${nextRoundMatch.id} (order ${targetMatchOrderInNextRound}) now has both players.`,
+      );
+    }
   }
 
   async checkAndGenerateBracket(
