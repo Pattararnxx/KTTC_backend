@@ -7,6 +7,24 @@ import { Tournament } from './entities/tournament.entity';
 import { UpdateMatchScoreDto } from './dto/update-match-score.dto';
 
 type CreateUserData = Omit<User, 'id' | 'created_at'>;
+interface QualificationRules {
+  [groupName: string]: number;
+}
+
+interface PlayerWithGroupInfo extends User {
+  groupName?: string;
+  groupRank?: number;
+  totalPoints?: number;
+}
+
+interface PlayerStats {
+  id: number;
+  player: User;
+  points: number;
+  wins: number;
+  gamesWon: number;
+  gamesLost: number;
+}
 
 @Injectable()
 export class UsersService {
@@ -328,6 +346,7 @@ export class UsersService {
     category?: string;
     groupName?: string;
     round?: string;
+    rounds?: string[];
   }): Promise<Match[]> {
     const qb = this.matchRepository
       .createQueryBuilder('match')
@@ -340,12 +359,14 @@ export class UsersService {
         category: filters.category,
       });
     }
-    if (filters.groupName) {
+    if (filters.round === 'group' && filters.groupName) {
       qb.andWhere('match.group_name = :groupName', {
         groupName: filters.groupName,
       });
     }
-    if (filters.round) {
+    if (filters.rounds) {
+      qb.andWhere('match.round IN (:...rounds)', { rounds: filters.rounds });
+    } else if (filters.round) {
       qb.andWhere('match.round = :round', { round: filters.round });
     }
 
@@ -379,5 +400,322 @@ export class UsersService {
 
     await this.matchRepository.save(match);
     return match;
+  }
+
+  async checkAndGenerateBracket(
+    category: string,
+  ): Promise<{ message: string; generated: boolean }> {
+    const tournament = await this.tournamentRepository.findOne({
+      where: { category },
+    });
+
+    if (!tournament) {
+      return { message: 'Tournament not found', generated: false };
+    }
+
+    const groupMatches = await this.matchRepository.find({
+      where: {
+        tournament_id: tournament.id,
+        round: 'group',
+      },
+    });
+
+    const completedGroupMatches = groupMatches.filter(
+      (m) => m.status === 'completed',
+    );
+
+    if (completedGroupMatches.length !== groupMatches.length) {
+      return { message: 'Group stage not completed yet', generated: false };
+    }
+
+    const bracketMatches = await this.matchRepository.find({
+      where: {
+        tournament_id: tournament.id,
+        round: 'round16',
+      },
+    });
+
+    const bracketWithPlayers = bracketMatches.filter(
+      (m) => m.player1_id && m.player2_id,
+    );
+    if (bracketWithPlayers.length > 0) {
+      return { message: 'Bracket already generated', generated: false };
+    }
+
+    await this.generateBracketFromGroupResults(tournament.id, category);
+
+    return { message: 'Bracket generated successfully', generated: true };
+  }
+
+  private async generateBracketFromGroupResults(
+    tournamentId: number,
+    category: string,
+  ): Promise<void> {
+    const groupResults = await this.calculateGroupStandings(tournamentId);
+
+    const tournament = await this.tournamentRepository.findOne({
+      where: { id: tournamentId },
+    });
+
+    let qualificationRules: QualificationRules = {};
+    if (tournament?.qualification_rules) {
+      try {
+        const parsed = JSON.parse(tournament.qualification_rules) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          qualificationRules = parsed as QualificationRules;
+        }
+      } catch (error) {
+        console.error('Error parsing qualification rules:', error);
+        qualificationRules = {};
+      }
+    }
+
+    const qualifiedPlayers = this.selectQualifiedPlayers(
+      groupResults,
+      qualificationRules,
+    );
+
+    const seedPlayers = await this.userRepository.find({
+      where: {
+        category,
+        seed_rank: Not(IsNull()),
+      },
+      order: { seed_rank: 'ASC' },
+    });
+
+    const bracketPairs = this.createBracketPairings([
+      ...seedPlayers,
+      ...qualifiedPlayers,
+    ]);
+
+    await this.updateBracketMatches(tournamentId, bracketPairs);
+  }
+
+  private async calculateGroupStandings(
+    tournamentId: number,
+  ): Promise<Record<string, PlayerStats[]>> {
+    const groupMatches = await this.matchRepository.find({
+      where: {
+        tournament_id: tournamentId,
+        round: 'group',
+        status: 'completed',
+      },
+      relations: ['player1', 'player2'],
+    });
+
+    const groupStandings: Record<string, Map<number, PlayerStats>> = {};
+
+    groupMatches.forEach((match) => {
+      if (!match.group_name || !match.player1_id || !match.player2_id) return;
+
+      if (!groupStandings[match.group_name]) {
+        groupStandings[match.group_name] = new Map<number, PlayerStats>();
+      }
+
+      const standings = groupStandings[match.group_name];
+
+      if (!standings.has(match.player1_id)) {
+        standings.set(match.player1_id, {
+          id: match.player1_id,
+          player: match.player1!,
+          points: 0,
+          wins: 0,
+          gamesWon: 0,
+          gamesLost: 0,
+        });
+      }
+
+      if (!standings.has(match.player2_id)) {
+        standings.set(match.player2_id, {
+          id: match.player2_id,
+          player: match.player2!,
+          points: 0,
+          wins: 0,
+          gamesWon: 0,
+          gamesLost: 0,
+        });
+      }
+
+      const player1Stats = standings.get(match.player1_id);
+      const player2Stats = standings.get(match.player2_id);
+
+      if (!player1Stats || !player2Stats) return;
+
+      player1Stats.gamesWon += match.player1_score || 0;
+      player1Stats.gamesLost += match.player2_score || 0;
+      player2Stats.gamesWon += match.player2_score || 0;
+      player2Stats.gamesLost += match.player1_score || 0;
+
+      if (match.winner_id === match.player1_id) {
+        player1Stats.wins++;
+        player1Stats.points += 2;
+        if (match.player2_score && match.player2_score > 0) {
+          player2Stats.points += 1;
+        }
+      } else if (match.winner_id === match.player2_id) {
+        player2Stats.wins++;
+        player2Stats.points += 2;
+        if (match.player1_score && match.player1_score > 0) {
+          player1Stats.points += 1;
+        }
+      }
+    });
+
+    const sortedGroupStandings: Record<string, PlayerStats[]> = {};
+
+    Object.entries(groupStandings).forEach(([groupName, standings]) => {
+      sortedGroupStandings[groupName] = Array.from(standings.values()).sort(
+        (a, b) => {
+          if (a.points !== b.points) return b.points - a.points;
+          if (a.wins !== b.wins) return b.wins - a.wins;
+          const aRatio =
+            a.gamesLost === 0 ? a.gamesWon : a.gamesWon / a.gamesLost;
+          const bRatio =
+            b.gamesLost === 0 ? b.gamesWon : b.gamesWon / b.gamesLost;
+          return bRatio - aRatio;
+        },
+      );
+    });
+
+    return sortedGroupStandings;
+  }
+
+  private selectQualifiedPlayers(
+    groupStandings: Record<string, PlayerStats[]>,
+    qualificationRules: QualificationRules,
+  ): PlayerWithGroupInfo[] {
+    const qualified: PlayerWithGroupInfo[] = [];
+
+    Object.entries(groupStandings).forEach(([groupName, standings]) => {
+      const qualifyCount = qualificationRules[groupName] || 2;
+      const groupQualified = standings.slice(0, qualifyCount);
+
+      groupQualified.forEach((playerStats, index) => {
+        const playerWithGroupInfo: PlayerWithGroupInfo = {
+          ...playerStats.player,
+          groupName,
+          groupRank: index + 1,
+          totalPoints: playerStats.points,
+        };
+        qualified.push(playerWithGroupInfo);
+      });
+    });
+
+    return qualified;
+  }
+
+  private createBracketPairings(
+    allPlayers: (User | PlayerWithGroupInfo)[],
+  ): { player1: User; player2: User }[] {
+    const pairs: { player1: User; player2: User }[] = [];
+
+    const seedPlayers = allPlayers
+      .filter((p) => p.seed_rank)
+      .sort((a, b) => (a.seed_rank || 0) - (b.seed_rank || 0));
+    const groupPlayers = allPlayers.filter(
+      (p) => !p.seed_rank,
+    ) as PlayerWithGroupInfo[];
+
+    groupPlayers.sort((a, b) => {
+      if ((a.totalPoints || 0) !== (b.totalPoints || 0)) {
+        return (b.totalPoints || 0) - (a.totalPoints || 0);
+      }
+      return (a.groupRank || 0) - (b.groupRank || 0);
+    });
+
+    const combinedPlayers = [...seedPlayers, ...groupPlayers];
+    console.log('Combined players for pairing:', combinedPlayers.length);
+
+    const usedPlayers = new Set<number>();
+
+    combinedPlayers.forEach((player1) => {
+      if (usedPlayers.has(player1.id)) return;
+
+      const opponent = combinedPlayers.find(
+        (player2) =>
+          !usedPlayers.has(player2.id) &&
+          player2.id !== player1.id &&
+          player1.affiliation !== player2.affiliation &&
+          this.getPlayerGroupName(player1) !== this.getPlayerGroupName(player2),
+      );
+
+      if (opponent) {
+        pairs.push({ player1, player2: opponent });
+        usedPlayers.add(player1.id);
+        usedPlayers.add(opponent.id);
+      }
+    });
+
+    console.log('Pairs after strict matching:', pairs.length);
+    combinedPlayers.forEach((player1) => {
+      if (usedPlayers.has(player1.id)) return;
+
+      const opponent = combinedPlayers.find(
+        (player2) =>
+          !usedPlayers.has(player2.id) &&
+          player2.id !== player1.id &&
+          player1.affiliation !== player2.affiliation,
+      );
+
+      if (opponent) {
+        pairs.push({ player1, player2: opponent });
+        usedPlayers.add(player1.id);
+        usedPlayers.add(opponent.id);
+      }
+    });
+    console.log('Pairs after relaxed matching:', pairs.length);
+
+    combinedPlayers.forEach((player1) => {
+      if (usedPlayers.has(player1.id)) return;
+
+      const opponent = combinedPlayers.find(
+        (player2) => !usedPlayers.has(player2.id) && player2.id !== player1.id,
+      );
+
+      if (opponent) {
+        pairs.push({ player1, player2: opponent });
+        usedPlayers.add(player1.id);
+        usedPlayers.add(opponent.id);
+      }
+    });
+
+    console.log('Final pairs:', pairs.length);
+    console.log('Unused players:', combinedPlayers.length - usedPlayers.size);
+
+    return pairs;
+  }
+
+  private async updateBracketMatches(
+    tournamentId: number,
+    pairs: { player1: User; player2: User }[],
+  ): Promise<void> {
+    const bracketMatches = await this.matchRepository.find({
+      where: {
+        tournament_id: tournamentId,
+        round: 'round16',
+      },
+      order: { match_order: 'ASC' },
+    });
+
+    console.log('Available bracket slots:', bracketMatches.length);
+    console.log('Pairs to assign:', pairs.length);
+
+    for (let i = 0; i < Math.min(pairs.length, bracketMatches.length); i++) {
+      const match = bracketMatches[i];
+      const pair = pairs[i];
+
+      await this.matchRepository.update(match.id, {
+        player1_id: pair.player1.id,
+        player2_id: pair.player2.id,
+        status: 'pending',
+      });
+    }
+  }
+  private getPlayerGroupName(
+    player: User | PlayerWithGroupInfo,
+  ): string | undefined {
+    return (
+      (player as PlayerWithGroupInfo).groupName || (player as User).group_name
+    );
   }
 }

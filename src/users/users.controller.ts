@@ -1,14 +1,14 @@
 import {
+  BadRequestException,
+  Body,
   Controller,
+  Get,
+  Param,
+  Patch,
   Post,
+  Query,
   UploadedFile,
   UseInterceptors,
-  Body,
-  Get,
-  Query,
-  Patch,
-  Param,
-  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -97,9 +97,27 @@ export class UsersController {
   async getMatches(
     @Query('category') category?: string,
     @Query('group') groupName?: string,
-    @Query('round') round?: string,
+    @Query('round') round?: string | string[],
   ) {
-    return this.usersService.findMatches({ category, groupName, round });
+    const filters: {
+      category?: string;
+      groupName?: string;
+      round?: string;
+      rounds?: string[];
+    } = { category };
+
+    if (round === 'group' && groupName) {
+      filters.groupName = groupName;
+      filters.round = 'group';
+    } else if (Array.isArray(round)) {
+      filters.rounds = round;
+    } else if (round === 'bracket') {
+      filters.rounds = ['round16', 'quarter', 'semi', 'final'];
+    } else if (typeof round === 'string') {
+      filters.round = round;
+    }
+
+    return this.usersService.findMatches(filters);
   }
 
   @Patch('matches/:id/score')
@@ -108,5 +126,15 @@ export class UsersController {
     @Body() dto: UpdateMatchScoreDto,
   ) {
     return this.usersService.updateMatchScore(+id, dto);
+  }
+
+  @Post('tournament/:category/generate-bracket')
+  async generateBracket(@Param('category') category: string) {
+    try {
+      return await this.usersService.checkAndGenerateBracket(category);
+    } catch (error) {
+      console.error('Error generating bracket:', error);
+      throw new BadRequestException('Failed to generate bracket');
+    }
   }
 }
